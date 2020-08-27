@@ -21,7 +21,7 @@ Because there are now two levels of differentiation, the model can learn an inte
 
 I predicted the winner of each game of the NCAA March Madness 2020 tournament using a voting ensemble of the following models:
 
-* Logistic regression
+* Logistic Regression
 * Support Vector Classification
 * Gradient Boosting
 * Random Forest
@@ -30,4 +30,4 @@ I found a significant increase in the cross-validation accuracy of my test set w
 
 ## Results
 
-Unfortunately, the tournament was cancelled due to Covid-19 so I wasn't able to compete with the model on Kaggle. 
+Unfortunately, the tournament was cancelled due to Covid-19 so I wasn't able to compete with the model on Kaggle.
