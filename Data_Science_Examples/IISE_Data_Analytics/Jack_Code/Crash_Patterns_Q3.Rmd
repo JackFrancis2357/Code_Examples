@@ -1,0 +1,486 @@
+---
+title: "Crash_Patterns_Q3"
+author: "Jack Francis"
+date: "3/19/2020"
+output:
+  html_document:
+    df_print: paged
+---
+
+The identification of crash patterns is important for policy makers to assist drivers in avoiding dangerous behavior and driving times. Crash patterns can include the time of the crash (i.e. month, week, day, hour), weather conditions, type of road, and type of vehicle. We first investigate individual factors and then hypothesize some potential combinations of factors that may be related in identifying crash patterns
+
+```{r Library Import}
+require(tidyverse)
+require(lubridate)
+require(nycflights13)
+require(hms)
+require(stringr)
+require(forcats)
+require(fs)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(readxl)
+library(pracma)
+mov
+```
+
+## Initial Thoughts
+
+* There is probably a strong correlation between the time of day and crashes. Most miles are driven around rush hour during the week, while the most dangerous miles are driven at night on the Weekends, due to drunk/drugged driving. 
+* In general, it will be interesting to investigate the most likely times for crashes to occur during the day and year
+* We examine the effect of body type, but only in relation to other factors, since the direct effect is asked about in Question 5
+* Does the type of road have an impact on fatal crashes? Initial guess is that more lanes would lead to more fatal crashes, because these roads generally have higher speeds
+* How does weather affect the US? Generally we expect more crashes in snow/rain/fog, but would be interesting to look at how this effect varies by state (i.e. are Southern drivers significantly worse at driving in snow)
+* Curious if there is a relationship between the number of accidents on a given type of road and the time of day
+* Expect to see spikes in accidents near holidays
+
+
+```{r Christian Data Import, echo = FALSE, eval = FALSE}
+ACC_df <- read_excel("~/OneDrive/Industrial Engineering/DAIS Competition/FARS2018Excel/ACCIDENT.xlsx")
+VEH_df <- read_excel("~/OneDrive/Industrial Engineering/DAIS Competition/FARS2018Excel/VEHICLE.xlsx")
+miles_of_road <- read_excel("~/OneDrive/Industrial Engineering/DAIS Competition/2013 miles of road per state.xlsx")
+state_population <- read_excel("~/OneDrive/Industrial Engineering/DAIS Competition/2014 state population and total area.xlsx")
+```
+
+
+First, read in the data including our external data sources giving information about the total miles of road and state population/area. Next, take a few columns from the Accident table and join with the vehicle table. 
+
+```{r Jack Data Import, message=FALSE}
+ACC_df <- read_csv("../FARS_Data/FARS2018NationalCSV/ACCIDENT.csv")
+VEH_df <- read_csv("../FARS_Data/FARS2018NationalCSV/VEHICLE.csv")
+miles_of_road <- read_excel("../Background_Information/2013 miles of road per state.xlsx")
+state_population <- read_excel("../Background_Information/2014 state population and total area.xlsx")
+a <- select(ACC_df, ST_CASE, DAY_WEEK, RUR_URB, FUNC_SYS)
+# Get the day of the week for each accident and road information
+VEH_df <- left_join(VEH_df, a, by = c(ST_CASE = "ST_CASE"))
+VEH_df <- VEH_df %>% mutate(time_of_day = if_else(HOUR < 12, "Morning", "Afternoon"))
+ACC_df <- ACC_df %>% mutate(time_of_day = if_else(HOUR < 12, "Morning", "Afternoon"))
+
+```
+
+
+Lets look at when during the day and week an accident is most likely to happen. 
+
+```{r}
+ACC_df$DAY_WEEK <- as.character(ACC_df$DAY_WEEK)
+Acc_per_hour_day <- ACC_df %>% filter(HOUR < 24) %>% 
+  mutate(DAY_WEEK = fct_recode(DAY_WEEK, Sunday = "1", Monday = "2", Tuesday = "3",
+                               Wednesday = "4", Thursday = "5", Friday = "6", Saturday = "7"))
+h <- table(Acc_per_hour_day$HOUR, Acc_per_hour_day$DAY_WEEK)
+view(h)
+barplot(h, beside = T, cex.names = 0.75, ylab = "Number of Accidents", xlab = "Days of the week", main = "Number of Accidents Occuring Each Hour for Each Day of the Week")
+
+
+```
+
+For weekdays, there is a spike at 6 AM, followed by a decrease until about 10 AM. After 10 AM, there is a slow increase until rush hour (5 - 7 PM), then a reduction in crashes until the next day at 6 AM. There are large peaks on weekend nights (Friday and Saturday Night) from roughly 8 PM to 2 AM. Our initial hypothesis is that this is strongly correlated with drunk drivers and will be tested shortly.
+
+Next, let's combine all days together and see how accidents change by hour of the day
+```{r}
+ggplot(data = Acc_per_hour_day, aes(x = HOUR, y = ..count.., fill = ..count..)) +
+  geom_bar() +
+  xlim(c(0, 24)) +
+  xlab("Hour of the Day") +
+  ylab("Number of Accidents") +
+  ggtitle("Number of accidents by Hour of the Day") +
+  theme(legend.position="bottom", legend.direction="horizontal", legend.text = element_text(size=14), legend.key.width = unit(2.5, "cm"), legend.title = element_blank())
+```
+Similar to the previous plot, there is a spike around 6 AM, a decrease until 10 AM and then a slow increase the remainder of the day. This plot shows that most accidents occur between 4 and 9 PM. Thus, in general it is more dangerous to drive in rush hour traffic than late night weekend traffic on average. 
+
+
+Another visualization is to see how the times of AM and PM compare to each other. 
+```{r}
+ACC_df$HOUR2 <- format(strptime(ACC_df$HOUR, "%H"), "%I")
+hourly_accident_plot <- ACC_df %>% filter(HOUR2 < 13) %>%
+  ggplot(aes(x = HOUR2, y = ..count.., shade = time_of_day, fill = ..count..)) + 
+  geom_bar(mapping = aes(x = HOUR2, y = ..count.., fill = time_of_day), position = "dodge") +
+  xlab("Hour on the Clock") +
+  ylab("Number of Accidents") +
+  ggtitle("Number of accidents by Hour on the Clock") +
+  theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank())#+
+  coord_polar()
+#+ geom_text(aes(y=..count..,label= ..count..), color= 'white', size =2)
+hourly_accident_plot
+```
+
+We find that the afternoon hours (i.e. 12 PM to 12 AM) are more dangerous. Interestingly, 11 AM and 11 PM have roughly the same amount of accidents.
+
+There are large spikes of accidents from 8 PM to 3 AM for Friday Night and Saturday Night. First, let's do a preliminary check and make sure drinking is correlated by only examining accidents from 12 AM to 3 AM. 
+```{r}
+drunk_early_morning<-ACC_df%>%
+  select(ST_CASE, HOUR, DAY_WEEK, DRUNK_DR)%>%
+  count(DAY_WEEK, HOUR, DRUNK_DR)%>%
+  filter(HOUR<= 3, DRUNK_DR>=1)
+drunk_early_morning%>%
+  group_by(DAY_WEEK)%>%
+  mutate(x= sum(n))%>%sample_n(1)%>%
+  group_by()%>%
+  mutate(Pecent_accident_from_12_to_3 = x/sum(x))
+Late_drunk_acc<-aggregate(drunk_early_morning$n, by= list(Category=drunk_early_morning$DAY_WEEK),FUN= sum)
+barplot(Late_drunk_acc$x,
+        xlab = "Day of Week",
+        names = c("Sunday", "Monday", "Tuesday", "Wed.", "Thursday", "Friday", "Saturday"),
+        ylab = "Number of Accidents",
+        main = "Number of Drunk Driving Accidents by Day of Week from 12 AM to 3 AM")
+
+```
+
+Next, lets look at drinking accidents from 8 PM to 12 AM.
+
+```{r}
+drunk_late_night<-ACC_df%>%
+  select(ST_CASE, HOUR, DAY_WEEK, DRUNK_DR)%>%
+  count(DAY_WEEK, HOUR, DRUNK_DR)%>%
+  filter(HOUR>= 20, HOUR < 24, DRUNK_DR>=1)
+
+drunk_late_night%>%
+  group_by(DAY_WEEK)%>%
+  mutate(x= sum(n))%>%sample_n(1)%>%
+  group_by()%>%
+  mutate(Pecent_accident_from_12_to_3 = x/sum(x))
+
+Late_drunk_acc_night<-aggregate(drunk_late_night$n, by= list(Category=drunk_late_night$DAY_WEEK),FUN= sum)
+barplot(Late_drunk_acc_night$x,
+        xlab = "Day of Week",
+        names = c("Sunday", "Monday", "Tuesday", "Wed.", "Thursday", "Friday", "Saturday"),
+        ylab = "Number of Accidents",
+        main = "Number of Drunk Driving Accidents by Day of Week from 8 PM to 12 AM")
+
+```
+
+There is an increase in drunk driving accidents from 8 PM to 12 AM on Friday and Saturday night, but it seems that the majority of drunk driving accidents occur after 12 AM as shown by the previous figure.
+
+
+Next, we examine the effect of the evening rush hour on fatal accidents. This is a time when many people are driving, so it is likely that a large number of accidents occur in this time window. It may be interesting to look at the 6-8 AM rush hour combined with this.
+Number of accidents during rush hour compared to the number of accidents not during rush hour
+```{r}
+Rush_hour_acc<-ACC_df%>%
+  select(ST_CASE, HOUR, DAY_WEEK)%>%
+  count(DAY_WEEK, HOUR)%>%
+  filter(16<=HOUR, HOUR< 20, DAY_WEEK != 1, DAY_WEEK != 7)
+
+rush_hour_accidents <- aggregate(Rush_hour_acc$n, by= list(Category=Rush_hour_acc$DAY_WEEK),FUN= sum)
+
+Not_rush_hour_acc<-ACC_df%>%
+  select(ST_CASE, HOUR, DAY_WEEK)%>%
+  count(DAY_WEEK, HOUR)%>%
+  subset(HOUR >=20 | HOUR<16 | DAY_WEEK == 1 | DAY_WEEK == 7)
+
+not_rush_hour_accidents <- aggregate(Not_rush_hour_acc$n, by= list(Category=Not_rush_hour_acc$DAY_WEEK),FUN= sum)
+
+rush_hour_acc_percent <- sum(rush_hour_accidents[,2]) / (sum(rush_hour_accidents[,2]) +
+                                                         sum(not_rush_hour_accidents[,2]))
+
+print(sprintf("Percentage of Accidents that Occur during Rush Hour is %s%%",
+              round(rush_hour_acc_percent*100, digits = 3)))
+
+rush_hour_accidents = cbind(rush_hour_accidents, "Rush Hour")
+colnames(rush_hour_accidents) <- c("Day", "Number", "Category")
+not_rush_hour_accidents = cbind(not_rush_hour_accidents, "Not Rush Hour")
+colnames(not_rush_hour_accidents) <- c("Day", "Number", "Category")
+
+all_accidents = rbind(rush_hour_accidents, not_rush_hour_accidents)
+
+ggplot(all_accidents, aes(fill=all_accidents$Category, y=all_accidents$Number, x=all_accidents$Day)) +
+  geom_bar(position=position_stack(reverse = TRUE), stat="identity") +
+  xlab("Day of the Week") + 
+  # names(c("Sunday", "Monday", "Tuesday", "Wed.", "Thursday", "Friday", "Saturday")) + 
+  ylab("Number of Accidents") +
+  ggtitle("Number of Evening Rush Hour Accidents on each Day of Week") +
+  scale_x_discrete(breaks=1:7, labels=c("Sunday", "Monday", "Tuesday", "Wed.", "Thursday", "Friday", "Saturday")) +
+  theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank())
+```
+
+Overall, evening rush hour accidents comprise 15% of accidents, while only being 12% of total time during the week.
+
+Next, let's look at how the type of vehicle is related to crash patterns.
+```{r}
+Truck <- VEH_df %>% count(MODEL) %>% filter(MODEL > 400, MODEL < 500)
+Truck <- sum(Truck$n)
+
+Automobile <- VEH_df %>% count(MODEL) %>% filter(MODEL < 400)
+Automobile <- sum(Automobile$n)
+
+Motorcycles <- VEH_df %>% count(MODEL) %>% filter(MODEL > 700, MODEL < 710)
+Motorcycles <- sum(Motorcycles$n)
+
+Heavy_Truck <- VEH_df %>% count(MODEL) %>% filter(MODEL > 880, MODEL < 900)
+Heavy_Truck <- sum(Heavy_Truck$n)
+
+ATV <- VEH_df %>% count(MODEL) %>% filter(MODEL > 730, MODEL < 740)
+ATV <- sum(ATV$n)
+
+MotorHome_Van <- VEH_df %>% count(MODEL) %>% filter(MODEL > 849, MODEL < 871)
+MotorHome_Van <- sum(MotorHome_Van$n)
+
+Bus <- VEH_df %>% count(MODEL) %>% filter(MODEL > 900, MODEL < 990)
+Bus <- sum(Bus$n)
+
+k <- rbind(Automobile, Truck, Motorcycles, Heavy_Truck, ATV, MotorHome_Van, Bus)
+k <- as.data.frame(k)
+barplot(k$V1,
+        xlab = "Model Group",
+        names = c("Automobile", "Truck", "Motorcycle", "Heavy Truck", "ATV", "MotorHome/Van", "Bus"),
+        ylab = "Number of Vehicles involved in Accidents",
+        main = "Number of Vehicles involved in Accidents by Model Group")
+# normailized which car is more frequently droven
+```
+
+Next, lets look at the road type and how that is relatead to crashes. Need to bring in the FUNC SYS and RURURB tables to identify what these are. First, we examine the frequency of each attribute in the FARS dictionary for both FUNCSYS and RURURB
+
+FUNC SYS Codes | Attributes
+------ | -------
+1 | Interstate
+2 | Principal Arterial - Other Freeways and Expressways
+3 | Prinicipal Arterial - Other
+4 | Minor Arterial
+5 | Major Collector
+6 | Minor Collector
+7 | Local
+96 | Trafficway not in State Inventory
+98 | Not Reported
+99 | Unknown
+
+
+```{r}
+ACC_df %>% count(FUNC_SYS)
+```
+
+From the data, we see that most accidents occur on arterial roadways. For future analysis, we can group these into 1) interstate 2) arterial 3) collector 4) local 5) Unknown
+
+RUR_URB Codes | Attributes
+------ | -------
+1 | Rural
+2 | Urban
+6 | Trafficway not in State Inventory
+8 | Not Reported
+9 | Unknown
+
+```{r}
+ACC_df %>% count(RUR_URB)
+```
+
+Surprisingly, there is only a slight increase in the number of accidents on urban roads. Our intuition was that more accidents would happen on urban roads at higher speeds. Finally, we can look at the type of road by signage. This is given in the Route column of the Accident Table
+
+ROUTE Codes | Attributes
+------ | -------
+1 | Interstate
+2 | US Highway
+3 | State Highway
+4 | County Road
+5 | Local Street - Township
+6 | Local Street - Municipality
+7 | Local Street - Frontage Road
+8 | Other
+9 |  Unknown
+
+```{r}
+ACC_df %>% count(ROUTE)
+```
+
+Interestingly, most accidents happen on state highways by far. The next most common are US highways and local streets
+
+Next, lets look at how crashes are related to the number of lanes on a road. From the FARS Data, 0 is non-trafficway/driveway, 8 is not reported and 9 is unknown. All others are the number of lanes for the road
+
+```{r}
+accident_from_veh_df <- VEH_df[!duplicated(VEH_df$ST_CASE),]
+
+accident_from_veh_df %>% select(VNUM_LAN, VPROFILE) %>% filter(VNUM_LAN < 8) %>%
+  ggplot(aes(x=VNUM_LAN, y=..count.. ))+ geom_bar() +
+  xlab("Number of Lanes") + 
+  # names(c("Sunday", "Monday", "Tuesday", "Wed.", "Thursday", "Friday", "Saturday")) + 
+  ylab("Number of Accidents") +
+  ggtitle("Number of Accidents by Lanes on Road") +
+  scale_x_continuous(breaks=0:7, labels=c("0", "1", "2", "3", "4", "5", "6", "7+")) +
+  theme(legend.position="bottom", legend.direction="horizontal", legend.title = element_blank())
+#%>%count(VPROFILE)
+# Majority of roads are flat in the united states but it is interesting to note many accidents occur on a slope,
+```
+From this frequency plot, we can see that fatal accidents happen most frequently on 2-lane roads. One callout here is that in the FARS dictionary, a 2 lane road with a dedicated turn lane at the time of the accident is classified as a 3-lane road. So it is very likely that many of the accidents on 3 lane roads are on 2-lane roads with a turn lane. Similarly, some of the 2-lane accidents could be on 1-lane roads with a dedicated turn lane at the time of the crash.
+
+
+Next steps
+
+Next, lets examine the relationship between weather and crashes. First lets examine the frequency of each weather type occuring. The relevant codes are below:
+
+WEATHER Codes | Attributes
+-|-
+00 | No Additional Atmospheric Conditions
+01 | Clear
+02 | Rain
+03 | Sleet or Hail
+04 | Snow
+05 | Fog, Smog, Smoke
+06 | Severe Crosswinds
+07 | Blowing Sand, Soil, Dirt
+08 | Other
+10 | Cloudy
+11 | Blowing Snow
+12 | Freezing Rain or Drizzle
+98 | Not Reported
+99 | Reported as Unknown
+
+```{r Weather}
+ACC_df %>% count(WEATHER)
+```
+
+Most weather conditions for fatal crashes were either clear or cloudy. Note, the Data dictionary explicitly says not to assume any additional weather pattern when cloudy is recorded unless mentioned. Out of the weather conditions that generally are thought to negatively affect driver performance, rain was the most common, followed by snow and fog/smog/smoke. Lets exmaine the percentage of accidents where weather was involved.
+
+```{r Weather Involved Percentage}
+weather_related_accidents <- ACC_df %>% count(WEATHER) %>% filter(WEATHER > 1, WEATHER != 10, WEATHER < 98)
+print(sprintf("Percentage of fatal crashes where inclement weather was involved was %s%%",
+              round( sum(weather_related_accidents$n)*100/nrow(ACC_df), digits = 3)))
+```
+
+The weather and amount of light outside may be related. We can use the LGT_COND column which gives information on if the road was lit. For this, we assume that in both dawn and dusk the road is not adequately lit, since the data dictionary denotes these times as before the sun rises and after the sun sets respectively.
+
+```{r Visibilit and Weather Relationship}
+light_and_weather_accidents <- ACC_df %>% filter(WEATHER > 1, WEATHER != 10, WEATHER < 98, LGT_COND != 2, LGT_COND < 4)
+
+dark_and_weather_accidents <- ACC_df  %>% filter(WEATHER > 1, WEATHER != 10, WEATHER < 98) %>%
+  filter(LGT_COND != 1, LGT_COND != 3, LGT_COND < 6)
+
+print(sprintf("Percentage of fatal crashes where light and inclement weather was involved was %s%%",
+              round(nrow(light_and_weather_accidents)*100/nrow(ACC_df), digits = 4)))
+
+print(sprintf("Percentage of fatal crashes where dark and inclement weather was involved was %s%%",
+              round(nrow(dark_and_weather_accidents)*100/nrow(ACC_df), digits = 4)))
+```
+
+We find that weather related accidents are almost twice as frequent when there is sufficient lighting outside compared to when it is dark outside. 
+
+Next we investigate yearly trends in fatal accident data. First we examine if there are certain months which are more or less likely to have fatal accidents. 
+
+```{r}
+acc_per_month = ACC_df %>% count(MONTH)
+barplot(acc_per_month$n,
+        xlab = "Month",
+        names = seq(1,12,1),
+        ylab = "Number of Accidents",
+        main = "Number of Accidents Per Month")
+```
+
+In general, there are more accidents in the summer compared to the winter.
+
+Next lets look and see if there are any daily trends throughout the year
+
+```{r}
+month_day_accidents <- table(ACC_df$DAY, ACC_df$MONTH)
+barplot(month_day_accidents, beside = T, cex.names = 0.75,
+        ylab = "Count",
+        xlab = "Day of Year",
+        main = "Number of Accidents Occuring Each Day of 2018")
+```
+The above plot is quite noisy, so lets try plotting a 5-day moving average for the year. The main takeaway is that there are not many days that fall outside of the weekly average for that day of the week. There are consistent spikes 7 days apart, showing the large number of accidents that occur on Saturday more generally. Interestingly, there were was a spike for New Years Day, but no spike for traveling at Thanksgiving or Christmas, which is a common time for many people to travel.
+
+```{r}
+month_day_acc_long <- as.data.frame(month_day_accidents) %>% filter(Freq > 0)
+month_day_mov_aver = as.data.frame(movavg(month_day_acc_long$Freq, 5, 's'))
+month_day_mov_aver = cbind(seq(1,365,1), month_day_mov_aver)
+colnames(month_day_mov_aver) = c("Day", "Mov_Aver")
+ggplot(data = month_day_mov_aver,aes(x=Day, y=Mov_Aver))+
+  #geom_point() +
+  geom_smooth(color="lightblue",se=F)+
+  xlab("Day of Year")+
+  ylab("Number of Accidents") +
+  ggtitle("Number of Accidents Per Day 5-day Smoothed Moving Average") +
+  ylim(c(0,115))
+
+```
+
+Overall, this plot reinforces that the monthly trends are stronger than individual dates where people tend to travel. My intuition was that holidays would have large spikes, but the overall seasonal and day of week trends clearly dominate the pattern of fatal crashes. 
+
+```{r}
+Driver_age<-PER_df%>%
+  filter(SEAT_POS==11)%>%# seat 11 is identified as the driver in each accident
+  select(ST_CASE,AGE,SEX)%>%
+  filter(AGE<100, AGE>14)
+Driver_age%>%
+  ggplot(aes(x=AGE))+geom_histogram()
+```
+The figure above show at what ages there are the highest number of fatal accidents. 
+
+
+```{r}
+Driver_age_violation2<-left_join(VEH_df,Driver_age, by=c("ST_CASE"="ST_CASE"))%>%
+  filter(AGE<100, AGE>14)%>%
+  mutate(ST_CASE=paste(ST_CASE,".", VEH_NO))%>%
+  group_by(ST_CASE)%>%
+  filter(row_number(ST_CASE)<=1)%>%
+  filter(PREV_ACC<9)%>%
+  mutate(PREV_Violation= PREV_DWI+PREV_ACC+ PREV_DWI+PREV_OTH+ PREV_SPD+PREV_SUS1+ PREV_SUS2+PREV_SUS3)%>%
+  mutate(Date= as.Date( paste(2018, MONTH,DAY,sep="-"), "%Y-%m-%d"),
+         LastDate= as.Date( paste(LAST_YR, LAST_MO, 1,sep="-"), "%Y-%m-%d"),
+         time_since_last= Date- LastDate,
+         time_since_last= as.character(time_since_last),
+         time_since_last= parse_double(time_since_last))%>%
+  mutate(FirstDate= as.Date(paste(FIRST_YR, FIRST_MO, 1, sep = "-"), "%Y-%m-%d"),
+         time_btw_First_last= LastDate- FirstDate,
+         num_days_perAlt_before= time_btw_First_last/PREV_Violation,
+         num_days_perAlt_before= round(num_days_perAlt_before),
+         num_days_perAlt_before= as.character(num_days_perAlt_before),
+         num_days_perAlt_before= parse_number(num_days_perAlt_before))
+Driver_age_violation<- Driver_age_violation2%>%
+  select(AGE, DEATHS, PREV_Violation, time_since_last, num_days_perAlt_before, PREV_ACC)%>%
+  filter(PREV_Violation>0)%>%
+  filter(num_days_perAlt_before>0)
+Driver_age_altercation
+#Removed drivers with not pervious record because we cannot determine if they are at high risk when evaluating their driving record
+```
+```{r}
+Driver_Configuration<-Driver_age_altercation2%>%
+  group_by()%>%
+  mutate(ACC_TYPE=as.character(ACC_TYPE),
+         ACC_Configurations = fct_collapse(ACC_TYPE,
+              "Other"="0",
+              "Road Departure"= c("1",2:10),
+              "Single Driver"= c(11:16),
+              "Forward Impact"= c(20:33),
+              "Forward Impact"=c(38:43),
+              "Angle Sideswipe"= c(42:49),
+              "Head On"=c(50:53),
+              "Forward Impact"=c(54:62),
+              "Angle Sideswipe"= c(64:67),
+              "Turn Across Path"=c(68:75),
+              "Turn Into Path"=c(76:85),
+              "Straight Paths"= c(86:91),
+              "Other"= c(92:93),
+              "Other"= c(98:99)))%>%
+  mutate(AGE= as.character(AGE),
+         age= fct_collapse(AGE,
+              "15-25" = c("15","16","17","18","19","20","21","22","23","24","25"),
+              "26-35"= c(26:35),
+              "36-45"= c(36:45),
+              "46-55"= c(46:55),
+              "56-65"= c(56:65),
+              "66-100"= c(66:100)
+              ))
+
+Driver_Configurations_Model<-Driver_Configuration%>%
+  mutate(MODEL= as.character(MODEL),
+         MODEL= fct_collapse(MODEL,
+                "Automobile"= c("1",2:400),
+                "Truck"= c(401:500),
+                "Motorcycle"= c(700:710),
+                "Heavy Truck"=c(800:809,880:900),
+                "ATV"=c(730:740),
+                "Motor Home or Large Van"=c(849:871),
+                "Bus"=c(900:990),
+                "Other"=c(598,799,997,998,999)))
+
+Driver_Configurations_Model%>%
+  count(MODEL)%>%
+  ggplot(aes(x= MODEL, y= n))+geom_col()+coord_flip()+xlab("Model Group")+ylab("Number of Vehicles involved in Accidents")+ggtitle("Number of Vehicles involved in Accidents by Model Group")
+
+Driver_Configurations_Model%>%
+group_by(MODEL)%>%
+  count(MODEL, ACC_Configurations)%>%
+  mutate(x=sum(n),
+         y= n/x,
+         z=sum(y))%>%
+  filter(x>500)%>% #filter out vehichles involved in less than 1 percent of accidents. We determined there must be more than 500 accident in vehicle type to make a reference
+  ggplot(aes(x= MODEL, y= y, fill= ACC_Configurations))+geom_col(position = "fill")+ylab("Percent of Each Accident Configuration")+theme(legend.position = "right")+guides(fill= guide_legend(title = "Accident Configurations"))#+ggtitle("Percent of Vehicles involved in Each Accident Type")
+
+```
+Trucks and Automobile have similar values for each crash type with little variation. Motorcycles have significantly larger number of accidentsmnmnm that happen when turning across path likely due to not looking for motorcyles.  Motorcycles also have a higher number of turn into path so people are not looking for them when they are merging. Large trucks have a higher number of rear ends likely to due to more blind spots and not being able to see every obstacle. 
